@@ -24,20 +24,31 @@ def health():
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
-    reader = PdfReader(file.file)
-    text = "\n".join([page.extract_text() or "" for page in reader.pages])
+    try:
+        reader = PdfReader(file.file)
+        text = "\n".join([page.extract_text() or "" for page in reader.pages])
 
-    response = client.responses.create(
-        model="gpt-4.1-mini",
-        input=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": f"Aşağıdaki metni denetle ve raporla:\n{text}"
-            }
-        ]
-    )
+        # 🔴 KRİTİK: Metni sınırla (token patlamasını önler)
+        MAX_CHARS = 12000
+        if len(text) > MAX_CHARS:
+            text = text[:MAX_CHARS]
 
-    return {
-        "result": response.output_text
-    }
+        response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"Aşağıdaki metni denetle ve raporla:\n{text}"
+                }
+            ]
+        )
+
+        return {"result": response.output_text}
+
+    except Exception as e:
+        return {
+            "error": "Denetim sırasında hata oluştu",
+            "detail": str(e)
+        }
+

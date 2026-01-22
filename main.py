@@ -1,237 +1,220 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from pypdf import PdfReader
 import os
-from typing import List, Tuple
+from io import BytesIO
+import numpy as np
+import streamlit as st
+import fitz  # PyMuPDF
+import pdfplumber
+import faiss
+import openai
 
-from openai import OpenAI
+st.set_page_config(
+    page_title="İş Paketi Denetçi Ajanı",
+    page_icon="✅",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-app = FastAPI(title="Proje Denetçi API", version="1.0.0")
+st.markdown("""
+<style>
+.block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1200px; }
+.small-muted { color: #6b7280; font-size: 0.92rem; }
+.header {
+  padding: 14px 16px;
+  border: 1px solid rgba(120,120,120,.25);
+  border-radius: 12px;
+  background: rgba(240,240,240,.35);
+}
+.kpi {
+  border: 1px solid rgba(120,120,120,.25);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: rgba(255,255,255,.6);
+}
+.card {
+  border: 1px solid rgba(120,120,120,.25);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: rgba(240,240,240,.20);
+}
+</style>
+""", unsafe_allow_html=True)
 
-# OpenAI client (API key ENV: OPENAI_API_KEY)
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY environment variable is missing.")
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Header
+st.markdown('<div class="header">', unsafe_allow_html=True)
+c1, c2, c3 = st.columns([1, 3, 1], vertical_alignment="center")
+with c1:
+    st.markdown("**LOGO**")
+with c2:
+    st.markdown("## İş Paketi Denetçi Ajanı")
+    st.markdown(
+        '<div class="small-muted">Demo • Kurum içi talimatlar sabit • PDF yüklenince otomatik denetim raporu üretilir</div>',
+        unsafe_allow_html=True
+    )
+with c3:
+    st.markdown('<div class="small-muted" style="text-align:right;">Sürüm: v2.0</div>', unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
+st.divider()
 
-# -----------------------------
-# 1) KANONİK SİSTEM TALİMATI
-# -----------------------------
-AUDITOR_SYSTEM_PROMPT = r"""
-SEN BİR “İŞ PAKETİ DENETÇİ AJANI”SIN.
+# Sabit talimat (sizinki)
+SYSTEM_PROMPT = """
+Sen kurum içi bir İş Paketi Denetçi Ajanısın.
+Kurumsal ve resmi dil kullan.
+Yalnızca yüklenen PDF içeriğine dayan.
+PDF dışında bilgi uydurma.
+Hedeflerin ölçülebilirliğini denetle.
+Ölçülebilir hedef; metrik, sayısal eşik, birim ve ölçüm yöntemini içermelidir.
+Muğlak ifadeleri (optimize etmek, iyileştirmek, artırmak vb.) uygunsuz say.
+Yöntem–hedef uyumunu, ispat/doğrulama durumunu ve kritik riskleri belirt.
+Çıktıyı net, kısa ve karar verici şekilde üret.
+"""
 
-Rolün bir chatbot olmak, soru cevaplamak veya kullanıcıyı yönlendirmek DEĞİLDİR.
-Rolün; yüklenen belgeyi kurumsal Ar-Ge proje denetimi bakış açısıyla,
-eleştirel, tarafsız ve kanıta dayalı biçimde incelemektir.
+# API key
+api_key = None
+try:
+    api_key = st.secrets.get("OPENAI_API_KEY")
+except Exception:
+    api_key = None
+if not api_key:
+    api_key = os.environ.get("OPENAI_API_KEY")
+if not api_key:
+    st.error("OPENAI_API_KEY bulunamadı. Streamlit Cloud > Secrets içine ekleyin.")
+    st.stop()
+openai.api_key = api_key
 
-KULLANICIYA SORU SORMA.
-KULLANICIDAN TALİMAT BEKLEME.
-YALNIZCA BELGEYİ DENETLE.
+# Sidebar
+with st.sidebar:
+    st.markdown("### Çıktı")
+    st.write("• Otomatik Denetim Raporu")
+    st.divider()
+    st.markdown("### Politika")
+    st.caption("Yalnızca yüklenen PDF içeriği kullanılır. Harici bilgi üretilmez.")
 
----
+# KPI row
+k1, k2, k3 = st.columns(3)
+with k1:
+    st.markdown('<div class="kpi"><b>1) Belge Yükle</b><br><span class="small-muted">Rapor/İP PDF dosyasını ekleyin.</span></div>', unsafe_allow_html=True)
+with k2:
+    st.markdown('<div class="kpi"><b>2) Otomatik Denetim</b><br><span class="small-muted">Kriterler uygulanır, bulgular çıkarılır.</span></div>', unsafe_allow_html=True)
+with k3:
+    st.markdown('<div class="kpi"><b>3) Standart Rapor</b><br><span class="small-muted">Bulgular/Eksikler/Riskler/Aksiyonlar.</span></div>', unsafe_allow_html=True)
 
-TEMEL DENETİM YAKLAŞIMI:
+st.write("")
 
-Belgeyi aşağıdaki başlıklar altında incele:
+uploaded_file = st.file_uploader("Rapor/PDF yükleyin (İP denetimi)", type=["pdf"])
 
-1. Proje amacı açık, ölçülebilir ve somut mu?
-2. İş paketleri (İP) net biçimde tanımlanmış mı?
-3. Her iş paketinin:
-   - çıktısı (deliverable),
-   - başarım / kabul kriteri,
-   - ölçülebilir hedefi
-   açıkça belirtilmiş mi?
-4. İş paketleri ile zaman planı uyumlu mu?
-5. İş paketleri ile bütçe kalemleri tutarlı mı?
-6. Personel, görev dağılımı ve yetkinlikler net mi?
-7. Riskler tanımlanmış mı ve önlemler gerçekçi mi?
-8. Önceki projelerle fark ve yenilik açık mı?
-   - “Bu zaten önceki projenin hedefiydi” izlenimi var mı?
-9. Ölçeklenebilirlik, tekrar üretilebilirlik ve ürünleşme potansiyeli net mi?
-10. Pilot / saha / doğrulama aşamaları gerçekçi mi?
+def extract_pages_pymupdf(pdf_bytes: bytes) -> list[str]:
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    return [(p.get_text("text") or "") for p in doc]
 
----
-
-DENETÇİ DİLİ VE DAVRANIŞ KURALLARI:
-
-- Belge içinde kanıt yoksa “BELGEDE BU BİLGİYE RASTLANMAMIŞTIR” de.
-- Varsayım yapma.
-- Yumuşatma yapma.
-- “Bence”, “muhtemelen”, “olabilir” gibi ifadeler kullanma.
-- Her bulgu için mümkünse sayfa/bölüm referansı ver.
-- Majör ve minör uygunsuzluk ayrımı yap.
-
----
-
-MAJÖR UYGUNSUZLUK ÖRNEKLERİ (BUNLAR CİDDİ HATA SAYILIR):
-
-- İş paketinde çıktı tanımlanmamış olması
-- Ölçülebilir hedef olmaması
-- “Danışmanlık”, “genel çalışma”, “araştırılacaktır” gibi muğlak ifadeler
-- Önceki projenin aynısının yeniden yazılmış olması
-- Pilot / saha doğrulamasının belirsiz olması
-- Ürünleşme yolunun tanımlanmaması
-
----
-
-ÇIKTI FORMATIN (ZORUNLU):
-
-1. DENETİM ÖZETİ
-   - Genel değerlendirme (Uygun / Kısmen Uygun / Uygun Değil)
-
-2. İŞ PAKETİ BAZLI BULGULAR
-   - Her iş paketi için kısa değerlendirme
-
-3. UYGUNSUZLUKLAR
-   - Majör Uygunsuzluklar
-   - Minör Uygunsuzluklar
-
-4. DÜZELTME ÖNERİLERİ
-   - Net, kısa, uygulanabilir maddeler
-
-5. GENEL DENETÇİ YORUMU
-   - Bu projenin bu haliyle kabul edilip edilemeyeceğine dair açık görüş
-
----
-
-UNUTMA:
-SEN BİR DENETÇİSİN.
-AMACIN BEĞENMEK DEĞİL, UYGUNLUĞU KONTROL ETMEKTİR.
-""".strip()
-
-
-# -----------------------------
-# 2) PDF METİN ÇIKARMA
-# -----------------------------
-def extract_text_with_pages(reader: PdfReader) -> List[Tuple[int, str]]:
-    """
-    Returns: [(page_no, text), ...] page_no starts at 1
-    """
-    pages = []
-    for i, page in enumerate(reader.pages, start=1):
-        t = page.extract_text() or ""
-        # normalize a bit
-        t = t.replace("\x00", "").strip()
-        pages.append((i, t))
-    return pages
-
-
-def build_audit_payload(pages: List[Tuple[int, str]], max_chars: int) -> str:
-    """
-    Packs page texts with page markers. Truncates safely to max_chars.
-    """
-    # Build full text with page references.
-    chunks = []
-    for page_no, text in pages:
-        if not text:
-            continue
-        chunks.append(f"\n=== SAYFA {page_no} ===\n{text}\n")
-    combined = "\n".join(chunks).strip()
-
-    if len(combined) > max_chars:
-        combined = combined[:max_chars].rstrip() + "\n\n[TRUNCATED: metin limit nedeniyle kesildi]"
-    return combined
-
-
-# -----------------------------
-# 3) OPSİYONEL OCR (istersen)
-# -----------------------------
-ENABLE_OCR = os.environ.get("ENABLE_OCR", "0") == "1"
-
-def ocr_pdf_bytes(pdf_bytes: bytes, max_pages: int = 25) -> List[Tuple[int, str]]:
-    """
-    Optional OCR. Requires: pdf2image + pytesseract + system deps (poppler, tesseract).
-    Returns [(page_no, ocr_text), ...]
-    """
-    try:
-        from pdf2image import convert_from_bytes
-        import pytesseract
-    except Exception as e:
-        raise RuntimeError(
-            "OCR is enabled but dependencies are missing. "
-            "Install pdf2image + pytesseract and system packages (poppler, tesseract)."
-        ) from e
-
-    images = convert_from_bytes(pdf_bytes, dpi=300, first_page=1, last_page=max_pages)
+def extract_pages_pdfplumber(pdf_bytes: bytes) -> list[str]:
     out = []
-    for idx, img in enumerate(images, start=1):
-        txt = pytesseract.image_to_string(img, lang="tur") or ""
-        txt = txt.strip()
-        out.append((idx, txt))
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            out.append(page.extract_text() or "")
     return out
 
+def make_chunks(pages: list[str]) -> list[str]:
+    chunks = []
+    for i, text in enumerate(pages):
+        parts = [p.strip() for p in text.split("\n\n") if p.strip()]
+        for part in parts:
+            if len(part) >= 40:
+                chunks.append(f"(Sayfa {i+1}) {part}")
+    return chunks
 
-# -----------------------------
-# 4) ENDPOINTS
-# -----------------------------
-@app.get("/")
-def health():
-    return {"status": "ok"}
-
-
-@app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
-    """
-    Upload a PDF. Returns an audit report.
-    No Q&A. No user instructions. Always runs audit with fixed system prompt.
-    """
+def safe_chat(messages):
     try:
-        pdf_bytes = await file.read()
-        if not pdf_bytes or len(pdf_bytes) < 100:
-            raise HTTPException(status_code=400, detail="Dosya boş veya okunamadı.")
-
-        # Parse PDF
-        reader = PdfReader(file=pdf_bytes)
-        pages = extract_text_with_pages(reader)
-
-        # Determine if text extraction is sufficient
-        raw_text_len = sum(len(t) for _, t in pages)
-        MIN_TEXT_CHARS = 500  # below this, it's likely scanned or protected
-
-        # If no text, try OCR (optional) else return clear error
-        if raw_text_len < MIN_TEXT_CHARS:
-            if ENABLE_OCR:
-                ocr_pages = ocr_pdf_bytes(pdf_bytes, max_pages=25)
-                raw_text_len = sum(len(t) for _, t in ocr_pages)
-                if raw_text_len < MIN_TEXT_CHARS:
-                    raise HTTPException(
-                        status_code=422,
-                        detail="PDF’den yeterli metin elde edilemedi. OCR denendi ama sonuç yetersiz."
-                    )
-                pages_for_audit = ocr_pages
-            else:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "PDF içinden metin çıkarılamadı (muhtemelen tarama PDF / metin katmanı yok). "
-                        "Bu uygulama denetim için metne ihtiyaç duyar. OCR gerekir. "
-                        "Sunucuda OCR açmak için ENABLE_OCR=1 ve OCR bağımlılıkları gereklidir."
-                    )
-                )
-        else:
-            pages_for_audit = pages
-
-        # Token/Cost control: cap chars
-        MAX_CHARS = int(os.environ.get("MAX_AUDIT_CHARS", "24000"))
-        audit_text = build_audit_payload(pages_for_audit, max_chars=MAX_CHARS)
-
-        # Call OpenAI: fixed audit behavior
-        response = client.responses.create(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"),
-            input=[
-                {"role": "system", "content": AUDITOR_SYSTEM_PROMPT},
-                {"role": "user", "content": audit_text},
-            ],
-        )
-
-        return {
-            "file_name": file.filename,
-            "extracted_chars": len(audit_text),
-            "result": response.output_text,
-        }
-
-    except HTTPException:
-        raise
+        return openai.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+        ).choices[0].message.content
     except Exception as e:
-        # Generic error
-        raise HTTPException(status_code=500, detail=f"Denetim sırasında hata oluştu: {str(e)}")
+        msg = str(e)
+        if "429" in msg or "insufficient_quota" in msg:
+            st.error("OpenAI API kota/billing hatası (429). API anahtarınızda kredi/billing yok veya limit dolmuş.")
+        else:
+            st.error(f"OpenAI API hatası: {e}")
+        st.stop()
+
+def generate_audit_report(pages_text: str) -> str:
+    # PDF çok uzunsa, LLM'e tamamını basmak yerine ilk N karakter/özet yaklaşımı gerekir.
+    # Demo için güvenli limit: ilk 60k karakter.
+    content = pages_text[:60000]
+
+    user_prompt = f"""
+Aşağıdaki içerik yüklenen PDF’den çıkarılmış metindir.
+
+GÖREV:
+- Bu metni iş paketi denetimi açısından değerlendir.
+- “ölçülebilir hedef” kontrolünü uygula (metrik, eşik, birim, ölçüm yöntemi).
+- Muğlak fiilleri tespit et (optimize/iyileştir/artır vb.) ve uygunsuz olarak işaretle.
+- Yöntem–hedef uyumu, doğrulama/kanıt, kritik riskleri belirt.
+- Sadece metinde olanı kullan, yoksa “PDF’de yok” de.
+
+ÇIKTI ŞABLONU (BU SIRA İLE):
+1) Yönetici Özeti (3–6 madde)
+2) Bulgular (madde madde; mümkünse sayfa referansı ile)
+3) Eksikler / Belirsizlikler (madde madde)
+4) Riskler (şiddet: Düşük/Orta/Yüksek + gerekçe)
+5) Önerilen Aksiyonlar (öncelik: P1/P2/P3)
+6) Ölçülebilir Hedef Düzeltmeleri (muğlak hedef → ölçülebilir örnek)
+
+PDF METNİ:
+{content}
+"""
+    return safe_chat(
+        [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+    )
+
+if not uploaded_file:
+    st.markdown('<div class="card"><b>Başlamak için</b><br><span class="small-muted">PDF yükleyin. Sistem otomatik denetim raporu üretecektir.</span></div>', unsafe_allow_html=True)
+    st.stop()
+
+pdf_bytes = uploaded_file.getvalue()
+
+with st.spinner("PDF metni çıkarılıyor..."):
+    pages = extract_pages_pymupdf(pdf_bytes)
+    total_chars = sum(len(x) for x in pages)
+    method_used = "PyMuPDF"
+
+    if total_chars < 200:
+        pages2 = extract_pages_pdfplumber(pdf_bytes)
+        total_chars2 = sum(len(x) for x in pages2)
+        if total_chars2 > total_chars:
+            pages = pages2
+            total_chars = total_chars2
+            method_used = "pdfplumber"
+
+st.markdown(
+    f'<div class="card"><b>PDF Durumu</b><br>'
+    f'<span class="small-muted">Metin çıkarma yöntemi: <b>{method_used}</b> • Toplam karakter: <b>{total_chars}</b></span></div>',
+    unsafe_allow_html=True
+)
+
+pages_text = "\n".join(pages).strip()
+if not pages_text:
+    st.error("PDF içinden metin çıkarılamadı. (Metin katmanı yok / özel encoding). OCR gerekebilir.")
+    st.stop()
+
+with st.expander("Çıkan metin önizleme (ilk 300 karakter)"):
+    st.code(pages_text[:300])
+
+# Otomatik rapor üretimi
+st.subheader("Otomatik Denetim Raporu")
+with st.spinner("Denetim raporu hazırlanıyor (LLM)..."):
+    report = generate_audit_report(pages_text)
+
+st.markdown(report)
+
+# İndirilebilir çıktı (opsiyonel)
+st.download_button(
+    label="Raporu indir (TXT)",
+    data=report.encode("utf-8"),
+    file_name="denetim_raporu.txt",
+    mime="text/plain",
+)
+
 

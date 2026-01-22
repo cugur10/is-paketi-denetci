@@ -1,5 +1,6 @@
-fastapi
-uvicorn
-python-multipart
-pypdf
+streamlit
 openai
+numpy
+faiss-cpu
+pymupdf
+pdfplumber

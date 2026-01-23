@@ -150,24 +150,15 @@ GÖREV:
 - Muğlak fiilleri tespit et (optimize/iyileştir/artır vb.) ve uygunsuz olarak işaretle.
 - Yöntem–hedef uyumu, doğrulama/kanıt, kritik riskleri belirt.
 - Sadece metinde olanı kullan, yoksa “PDF’de yok” de.
-
-ÇIKTI ŞABLONU (BU SIRA İLE):
-1) Yönetici Özeti (3–6 madde)
-2) Bulgular (madde madde; mümkünse sayfa referansı ile)
-3) Eksikler / Belirsizlikler (madde madde)
-4) Riskler (şiddet: Düşük/Orta/Yüksek + gerekçe)
-5) Önerilen Aksiyonlar (öncelik: P1/P2/P3)
-6) Ölçülebilir Hedef Düzeltmeleri (muğlak hedef → ölçülebilir örnek)
-
-PDF METNİ:
-{content}
 """
+
     return safe_chat(
         [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
     )
+
 
 if not uploaded_file:
     st.markdown('<div class="card"><b>Başlamak için</b><br><span class="small-muted">PDF yükleyin. Sistem otomatik denetim raporu üretecektir.</span></div>', unsafe_allow_html=True)

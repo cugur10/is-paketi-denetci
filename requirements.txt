@@ -1,6 +1,4 @@
 streamlit
 openai
-numpy
-faiss-cpu
 pymupdf
 pdfplumber

@@ -8,7 +8,7 @@ from openai import OpenAI
 
 
 # -----------------------------
-# UI / Page config
+# UI
 # -----------------------------
 st.set_page_config(
     page_title="İş Paketi Denetçi Ajanı",
@@ -45,7 +45,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Header
 st.markdown('<div class="header">', unsafe_allow_html=True)
 c1, c2, c3 = st.columns([1, 3, 1], vertical_alignment="center")
 with c1:
@@ -57,45 +56,21 @@ with c2:
         unsafe_allow_html=True,
     )
 with c3:
-    st.markdown(
-        '<div class="small-muted" style="text-align:right;">Sürüm: v2.1</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="small-muted" style="text-align:right;">Sürüm: v2.2</div>', unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
 st.divider()
 
-# Sidebar
 with st.sidebar:
-    st.markdown("### Çıktı")
-    st.write("• Otomatik Denetim Raporu (Şablon 1–9)")
+    st.markdown("### Menü")
+    st.write("• Belge Yükle")
+    st.write("• Otomatik Denetim Raporu")
     st.divider()
     st.markdown("### Politika")
-    st.caption("Yalnızca yüklenen PDF içeriği kullanılır. Harici bilgi üretilmez.")
-
-
-# KPI row
-k1, k2, k3 = st.columns(3)
-with k1:
-    st.markdown(
-        '<div class="kpi"><b>1) Belge Yükle</b><br><span class="small-muted">Rapor/İP PDF dosyasını ekleyin.</span></div>',
-        unsafe_allow_html=True,
-    )
-with k2:
-    st.markdown(
-        '<div class="kpi"><b>2) Otomatik Denetim</b><br><span class="small-muted">Kriterler uygulanır, bulgular çıkarılır.</span></div>',
-        unsafe_allow_html=True,
-    )
-with k3:
-    st.markdown(
-        '<div class="kpi"><b>3) Standart Rapor</b><br><span class="small-muted">Skor + Uyarılar + Tablo + Karar.</span></div>',
-        unsafe_allow_html=True,
-    )
-
-st.write("")
+    st.caption("Uygulama yalnızca yüklenen PDF içeriğine dayanır. Harici bilgi üretilmez.")
 
 
 # -----------------------------
-# Fixed system instruction (sizin sabit talimatınız)
+# Sabit talimat (değişmeyecek)
 # -----------------------------
 SYSTEM_PROMPT = """
 Sen kurum içi bir İş Paketi Denetçi Ajanısın.
@@ -111,30 +86,28 @@ Yöntem–hedef uyumunu, ispat/doğrulama durumunu ve kritik riskleri belirt.
 
 
 # -----------------------------
-# API key / client
+# OpenAI client
 # -----------------------------
 def get_api_key() -> str | None:
-    # Streamlit Cloud secrets
     try:
         v = st.secrets.get("OPENAI_API_KEY")
         if v:
             return v
     except Exception:
         pass
-    # env fallback
     return os.environ.get("OPENAI_API_KEY")
 
 
 api_key = get_api_key()
 if not api_key:
-    st.error('OPENAI_API_KEY bulunamadı. Streamlit Cloud > Settings > Secrets içine şu formatta ekleyin:\n\nOPENAI_API_KEY = "sk-..."')
+    st.error('OPENAI_API_KEY bulunamadı. Secrets içine şu formatla ekleyin:\n\nOPENAI_API_KEY = "sk-..."')
     st.stop()
 
 client = OpenAI(api_key=api_key)
 
 
 # -----------------------------
-# PDF text extraction
+# PDF extraction
 # -----------------------------
 def extract_pages_pymupdf(pdf_bytes: bytes) -> list[str]:
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -149,95 +122,93 @@ def extract_pages_pdfplumber(pdf_bytes: bytes) -> list[str]:
     return out
 
 
-# -----------------------------
-# LLM helper
-# -----------------------------
-def safe_chat(system_prompt: str, user_prompt: str) -> str:
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            temperature=0.2,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-        return resp.choices[0].message.content or ""
-    except Exception as e:
-        msg = str(e)
-        if "429" in msg or "insufficient_quota" in msg:
-            st.error("OpenAI API kota/billing hatası (429). API anahtarınızda kredi/billing yok veya limit dolmuş.")
-        else:
-            st.error(f"OpenAI API hatası: {e}")
-        st.stop()
+def get_pdf_text(pdf_bytes: bytes) -> tuple[str, str, int]:
+    pages = extract_pages_pymupdf(pdf_bytes)
+    total_chars = sum(len(x) for x in pages)
+    method = "PyMuPDF"
+
+    if total_chars < 300:
+        pages2 = extract_pages_pdfplumber(pdf_bytes)
+        total2 = sum(len(x) for x in pages2)
+        if total2 > total_chars:
+            pages = pages2
+            total_chars = total2
+            method = "pdfplumber"
+
+    text = "\n".join(pages).strip()
+    return text, method, total_chars
 
 
 # -----------------------------
-# Report generator (SİZİN İSTEDİĞİNİZ FORMAT)
+# Report generator (final)
 # -----------------------------
 def generate_audit_report(pages_text: str) -> str:
-    # Bu PDF'de 46k karakter var; tamamı rahatça girer.
-    content = pages_text[:90000]
+    content = pages_text[:90000]  # sizde 46k, tamamı giriyor
 
     user_prompt = f"""
-Aşağıdaki metin yüklenen PDF’den çıkarılmıştır. BU METİN DIŞINDA hiçbir bilgi kullanma, uydurma.
+Aşağıdaki metin PDF’den çıkarılmıştır. SADECE BU METNE dayan.
 
-KRİTİK KURALLAR:
+ZORUNLU FORMAT:
 - ÇIKTI ASLA tek satır “PDF’de yok.” olamaz.
-- Her koşulda aşağıdaki 1–9 ŞABLONU üret.
-- Bir alan PDF’de yoksa SADECE o alan/satır/hücre için “PDF’de yok / belirtilmemiş” yaz.
-- İş paketi adları (İP1, İP2...) açıkça yoksa tabloyu yine üret; “İş Paketi” sütununa “Belirtilmemiş” yaz.
+- Her koşulda 1–9 başlıklar üretilecek.
+- “PDF’de yok / belirtilmemiş” ifadesi SADECE ilgili madde/hücre için kullanılacak.
+- Metinde açıkça yoksa “bütçe, çevresel etki, toksik solvent, regülasyon” gibi konuları EKLEME.
 
-PUANLAMA (model içi):
-- Her “UYGUNSUZ” hedef: -10
-- Her “İSPAT EKSİK” hedef: -5
-- Her kritik uyarı: -2
-- Skor 0–100 aralığında kalsın.
+KANIT KURALI:
+- 2) Kritik Uyarılar bölümünde her uyarı maddesinin sonunda, metinden dayanak 3–10 kelimelik mini alıntı ver (tırnak içinde).
 
-ÇIKTI ŞABLONU (AYNEN BAŞLIKLARLA VE BU SIRAYLA):
+ÇIKTI ŞABLONU (AYNEN):
 1) Genel Uygunluk Özeti (0–100)
 Skor: <0-100>/100
-(2–4 cümle kısa özet)
 
 2) Kritik Uyarılar
-- 3–8 madde
+- ...
 
 3) Hedef Denetimi
-Markdown TABLO üret:
 İş Paketi | Hedef | Metrik | Değer | Birim | Ölçüm/İspat Yöntemi | Durum
-Durum sadece şu üç değerden biri: UYGUN / İSPAT EKSİK / UYGUNSUZ
+Durum: UYGUN / İSPAT EKSİK / UYGUNSUZ
 
 4) Sonuç–Hedef Karşılaştırması
-Markdown TABLO:
 İş Paketi | Değerlendirme | Gerekçe
-Değerlendirme sadece: Karşılandı / Kısmen Karşılandı / Karşılanmadı
+Değerlendirme: Karşılandı / Kısmen Karşılandı / Karşılanmadı
 
 5) Yöntem Uygunluğu / Kilit Riski
-- 3–6 madde
 
 6) İspat ve Ölçüm Durumu
-- Genel durum
-- İstisnalar
 
 7) Karar Önerisi
 Devam / Devam (Düzenleme koşuluyla) / Revizyon / Uygun Değil
 
 8) Karar Gerekçesi
-- 3–6 madde
 
 9) Düzeltilmesi Gereken Hususlar
-- İş paketi bazlı madde madde
-- Muğlak hedefleri ölçülebilir örneğe çevir (en az 2 örnek)
+- En az 2 muğlak hedefi ölçülebilir örneğe çevir
+
+PUANLAMA:
+- UYGUNSUZ: -10
+- İSPAT EKSİK: -5
+- Kritik uyarı: -2
+- Skor 0–100 aralığında.
 
 PDF METNİ:
+<<<
 {content}
+>>>
 """
 
-    return safe_chat(SYSTEM_PROMPT, user_prompt)
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0,  # stabil
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    return resp.choices[0].message.content or ""
 
 
 # -----------------------------
-# Main app flow
+# Main
 # -----------------------------
 uploaded_file = st.file_uploader("Rapor/PDF yükleyin (İP denetimi)", type=["pdf"])
 
@@ -251,18 +222,7 @@ if not uploaded_file:
 pdf_bytes = uploaded_file.getvalue()
 
 with st.spinner("PDF metni çıkarılıyor..."):
-    pages = extract_pages_pymupdf(pdf_bytes)
-    total_chars = sum(len(x) for x in pages)
-    method_used = "PyMuPDF"
-
-    # fallback (çok düşük çıktıysa)
-    if total_chars < 200:
-        pages2 = extract_pages_pdfplumber(pdf_bytes)
-        total_chars2 = sum(len(x) for x in pages2)
-        if total_chars2 > total_chars:
-            pages = pages2
-            total_chars = total_chars2
-            method_used = "pdfplumber"
+    pages_text, method_used, total_chars = get_pdf_text(pdf_bytes)
 
 st.markdown(
     f'<div class="card"><b>PDF Durumu</b><br>'
@@ -270,7 +230,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-pages_text = "\n".join(pages).strip()
 if not pages_text:
     st.error("PDF içinden metin çıkarılamadı. (Metin katmanı yok / özel encoding). OCR gerekebilir.")
     st.stop()
@@ -292,5 +251,3 @@ st.download_button(
     file_name="denetim_raporu.txt",
     mime="text/plain",
 )
-
-
